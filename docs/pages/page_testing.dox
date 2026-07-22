@@ -1,0 +1,104 @@
+/**
+@page page_testing Тестирование и верификация
+@brief Архитектура тестирования, интеграция GoogleTest и стратегии изоляции зависимостей.
+
+@section testing_philosophy Архитектурные принципы
+Тестирование инфраструктурных библиотек (`stc::signals`, `stc::logger`) и бизнес-логики базируется 
+на принципах изоляции окружения и строгой типизации зависимостей. 
+1. **Отказ от интеграционного тестирования на уровне ядра/ФС**: Тесты не требуют прав суперпользователя, 
+   реальных файловых дескрипторов или генерации сигналов ОС. Все системные вызовы и операции ввода-вывода 
+   абстрагированы через интерфейсы (`ISystemCalls`, `ILogger`, `IFileSink`).
+2. **Dependency Injection (DI)**: Компоненты не создают зависимости внутри себя. Экземпляры интерфейсов 
+   инжектируются через конструкторы, что позволяет в тестовой среде подменять их на Mock-объекты.
+3. **Покрытие граничных случаев (Edge Cases)**: Приоритет отдается тестированию состояний гонки, 
+   прерываний ядра (`EINTR`) и исчерпания ресурсов (`EMFILE`, `ENFILE`), а не только штатным сценариям.
+
+@section testing_tooling Инструментарий
+- **GoogleTest (GTest)**: Фреймворк для написания и запуска unit-тестов.
+- **GoogleMock (GMock)**: Используется для генерации Mock-объектов (например, `MockSystemCalls`), 
+  эмулирующих поведение ядра Linux и файловых систем.
+- **CMake**: Система сборки тестов интегрирована через стандартный механизм `enable_testing()` и `add_test()`.
+
+@dot
+digraph TestArchitecture {
+    rankdir=LR;
+    splines=ortho;
+    node [shape=record, fontname="Helvetica", fontsize=10];
+    
+    subgraph cluster_sut {
+        label="System Under Test (SUT)";
+        SUT [label="{SignalRouter / Worker|+ Start()\l+ Process()\l}"];
+    }
+    
+    subgraph cluster_mocks {
+        label="Test Doubles (GMock)";
+        MockSys [label="{MockSystemCalls|+ EpollWait()\l+ Read()\l}"];
+        MockSink [label="{MockFileSink|+ Write()\l+ Flush()\l}"];
+    }
+    
+    Runner [label="{GTest Runner|+ SetUp()\l+ TearDown()\l}"];
+    
+    Runner -> SUT [label="injects"];
+    SUT -> MockSys [label="uses", constraint=false];
+    SUT -> MockSink [label="uses", constraint=false];
+}
+@enddot
+
+@section testing_cmake Интеграция с системой сборки (CMake)
+Сборка тестов управляется опциями CMake. По умолчанию тесты отключены, чтобы не засорять сборку 
+основного проекта при подключении библиотек как подмодулей.
+
+@subsection testing_cmake_options Опции сборки
+Для включения тестов при локальной разработке используется флаг:
+@code{.cmake}
+cmake -B build -DSTC_SIGNALS_BUILD_TESTS=ON -DSTC_LOGGER_BUILD_TESTS=ON
+@endcode
+
+@subsection testing_cmake_fetchcontent Подключение через FetchContent
+Согласно стандарту проекта, при интеграции библиотек через `FetchContent` необходимо принудительно 
+отключать сборку их тестов и санитайзеров, чтобы избежать конфликтов версий GTest и дублирования целей:
+@code{.cmake}
+include(FetchContent)
+
+set(STC_SIGNALS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(STC_LOGGER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    stc_signals
+    GIT_REPOSITORY https://github.com/org/stc_signals.git
+    GIT_TAG        v1.0.0
+)
+FetchContent_MakeAvailable(stc_signals)
+@endcode
+
+@section testing_strategies Стратегии изоляции и Mock-объекты
+
+@subsection testing_signals stc::signals: Эмуляция ядра Linux
+Класс `MockSystemCalls` позволяет тестировать `SignalRouter` без взаимодействия с ядром. 
+Критические сценарии, покрываемые тестами:
+- **Обработка EINTR**: Эмуляция прерывания `epoll_wait` сигналом. Тест проверяет, что `WorkerLoop` 
+  не завершается с ошибкой, а переходит на следующую итерацию.
+- **Частичное чтение (Partial Read)**: Эмуляция возврата `Read()` значения, меньшего чем 
+  `sizeof(signalfd_siginfo)`. Тест гарантирует, что диспетчеризация не произойдет и мусорные данные 
+  не попадут в пользовательский обработчик.
+- **Исчерпание ресурсов**: Эмуляция возврата `-1` и `errno = EMFILE` при вызове `EpollCreate1`. 
+  Тест проверяет корректное завершение фонового потока и отсутствие утечек памяти.
+
+@subsection testing_logger stc::logger: Верификация вывода
+Для тестирования компонентов бизнес-логики (`XMLProcessor`, `Worker`) используется `MockLogger`.
+- **Проверка форматов**: Тесты верифицируют, что в `MockFileSink` передаются корректные DTO 
+  (уровень, сообщение, контекст) до их форматирования.
+- **Defensive Programming**: Тесты проверяют, что передача `nullptr` вместо логгера или вызов 
+  методов логгера после `Flush()` в деструкторе не приводят к падению процесса (Segmentation Fault).
+
+@section testing_execution Запуск и отчетность
+Для запуска тестов и генерации отчетов в формате JUnit XML (для интеграции с CI/CD) используется `ctest`:
+@code{.bash}
+cd build
+ctest --output-on-failure --output-junit test_results.xml
+@endcode
+
+Покрытие кода (Code Coverage) анализируется с помощью `gcov` и `lcov`. Целевой показатель 
+покрытия для инфраструктурных библиотек (`stc::signals`, `stc::logger`) составляет не менее 95%, 
+для бизнес-логики — не менее 80%.
+*/

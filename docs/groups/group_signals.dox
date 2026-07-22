@@ -1,0 +1,7 @@
+/**
+@defgroup Signals Компоненты обработки системных сигналов
+@{
+    @class stc::signals::SignalRouter
+    @class stc::signals::ISystemCalls
+@}
+*/
