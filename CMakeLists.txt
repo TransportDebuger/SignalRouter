@@ -91,6 +91,8 @@ install(EXPORT stc_signals_targets
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stc_signals
 )
 
+if(STC_SIGNALS_BUILD_TESTS)
+
 # ==============================================================================
 # Сбор списка исходных файлов для линтеров
 # ==============================================================================
@@ -234,4 +236,6 @@ else()
         COMMAND ${CMAKE_COMMAND} -E false
         COMMENT "FATAL: Doxygen not found. Please install Doxygen to generate documentation."
     )
+endif()
+
 endif()
